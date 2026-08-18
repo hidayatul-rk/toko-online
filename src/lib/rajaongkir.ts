@@ -2,11 +2,10 @@ import { getSetting } from "@/lib/settings";
 
 const RAJAONGKIR_BASE = "https://api.rajaongkir.com/starter";
 
-// Cache ongkir 1 jam (in-memory)
 const costCache = new Map<string, { data: { service: string; description: string; cost: number; etd: string }[]; expiry: number }>();
-const CACHE_TTL = 60 * 60 * 1000; // 1 jam
+const CACHE_TTL = 60 * 60 * 1000;
 
-type CourierCode = "jne" | "pos" | "tiki" | "jnt" | "sicepat" | "anteraja";
+export type CourierCode = "jne" | "pos" | "tiki" | "jnt" | "sicepat" | "anteraja";
 
 export const COURIERS: { code: CourierCode; name: string }[] = [
     { code: "jne", name: "JNE" },
@@ -31,7 +30,6 @@ export async function getShippingCost(
     const apiKey = await getSetting("rajaongkir_api_key", process.env.RAJAONGKIR_API_KEY ?? "");
     if (!apiKey) return [];
 
-    // Cek cache
     const cacheKey = `${courier}:${destinationCityId}:${weight}`;
     const cached = costCache.get(cacheKey);
     if (cached && cached.expiry > Date.now()) return cached.data;
@@ -52,7 +50,6 @@ export async function getShippingCost(
 
         const data = await res.json();
         const results = data?.rajaongkir?.results?.[0]?.costs ?? [];
-
         const mapped = results.map((c: RajaOngkirCost) => ({
             service: c.service,
             description: c.description,
@@ -67,26 +64,19 @@ export async function getShippingCost(
     }
 }
 
-export async function getCityId(
-    cityName: string,
-    provinceName: string,
-): Promise<string | null> {
+export async function getCityId(cityName: string, provinceName: string): Promise<string | null> {
     const apiKey = await getSetting("rajaongkir_api_key", process.env.RAJAONGKIR_API_KEY ?? "");
     if (!apiKey) return null;
 
     try {
-        const res = await fetch(`${RAJAONGKIR_BASE}/city`, {
-            headers: { key: apiKey },
-        });
+        const res = await fetch(`${RAJAONGKIR_BASE}/city`, { headers: { key: apiKey } });
         const data = await res.json();
         const cities = data?.rajaongkir?.results ?? [];
-
         const found = cities.find(
             (c: { city_name: string; province: string }) =>
                 c.city_name.toLowerCase().includes(cityName.toLowerCase()) &&
                 c.province.toLowerCase().includes(provinceName.toLowerCase()),
         );
-
         return found?.city_id ?? null;
     } catch {
         return null;

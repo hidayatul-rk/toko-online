@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { auth } from "@/lib/auth";
-import type { OrderStatus } from "@prisma/client";
+import type { OrderStatus, UserRole } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 async function requireAdmin() {
@@ -127,6 +127,29 @@ export async function deleteProduct(_prevState: { success: boolean; message: str
   }
 }
 
+export async function updateUserRole(_prevState: { success: boolean; message: string } | null, formData: FormData): Promise<{ success: boolean; message: string }> {
+  try {
+    const session = await auth();
+    if (!session?.user || session.user.role !== "ADMIN") throw new Error("Akses ditolak.");
+
+    const userId = String(formData.get("userId") ?? "");
+    const roleValue = String(formData.get("role") ?? "");
+    const role: UserRole = roleValue === "ADMIN" ? "ADMIN" : roleValue === "CUSTOMER" ? "CUSTOMER" : (() => { throw new Error("Role tidak valid."); })();
+
+    if (!userId) throw new Error("Pengguna tidak ditemukan.");
+    if (userId === session.user.id && role !== "ADMIN") throw new Error("Anda tidak dapat menurunkan role akun admin yang sedang digunakan.");
+
+    const user = await prisma.user.findUnique({ where: { id: userId }, select: { id: true, role: true } });
+    if (!user) throw new Error("Pengguna tidak ditemukan.");
+
+    await prisma.user.update({ where: { id: userId }, data: { role } });
+    revalidatePath("/admin/pengguna");
+    return { success: true, message: "Role pengguna berhasil diubah." };
+  } catch (error) {
+    return { success: false, message: error instanceof Error ? error.message : "Gagal mengubah role pengguna." };
+  }
+}
+
 const allowedTransitions: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ["PAID", "CANCELLED"],
   PAID: ["PROCESSING", "CANCELLED"],
@@ -148,20 +171,11 @@ export async function updateOrderStatus(_prevState: { success: boolean; message:
       const order = await tx.order.findUnique({ where: { id }, include: { items: true } });
       if (!order) throw new Error("Pesanan tidak ditemukan.");
       if (order.status === nextStatus) return false;
-      if (!allowedTransitions[order.status].includes(nextStatus)) {
-        throw new Error(`Transisi ${order.status} → ${nextStatus} tidak diizinkan.`);
-      }
-
+      if (!allowedTransitions[order.status].includes(nextStatus)) throw new Error(`Transisi ${order.status} → ${nextStatus} tidak diizinkan.`);
       if (nextStatus === "CANCELLED") {
-        for (const item of order.items) {
-          await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
-        }
+        for (const item of order.items) await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
       }
-
-      const updated = await tx.order.updateMany({
-        where: { id, status: order.status },
-        data: { status: nextStatus },
-      });
+      const updated = await tx.order.updateMany({ where: { id, status: order.status }, data: { status: nextStatus } });
       if (updated.count !== 1) throw new Error("Status pesanan berubah. Silakan muat ulang halaman.");
       return true;
     });

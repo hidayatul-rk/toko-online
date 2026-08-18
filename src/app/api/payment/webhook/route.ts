@@ -24,7 +24,9 @@ async function isValidSignature(notification: MidtransNotification) {
   const serverKey = await getServerKey();
   const raw = notification.order_id + notification.status_code + notification.gross_amount + serverKey;
   const expected = crypto.createHash("sha512").update(raw).digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(notification.signature_key));
+  const provided = Buffer.from(notification.signature_key);
+  const expectedBuffer = Buffer.from(expected);
+  return provided.length === expectedBuffer.length && crypto.timingSafeEqual(expectedBuffer, provided);
 }
 
 function mapOrderStatus(transactionStatus: string, fraudStatus?: string) {
@@ -35,12 +37,12 @@ function mapOrderStatus(transactionStatus: string, fraudStatus?: string) {
 }
 
 const rank: Record<string, number> = {
+  CANCELLED: -1,
   PENDING: 0,
   PAID: 1,
   PROCESSING: 2,
   SHIPPED: 3,
   COMPLETED: 4,
-  CANCELLED: -1,
 };
 
 export async function POST(request: NextRequest) {
@@ -49,7 +51,6 @@ export async function POST(request: NextRequest) {
     if (!notification.order_id || !notification.signature_key || !notification.gross_amount) {
       return NextResponse.json({ message: "Invalid notification" }, { status: 400 });
     }
-
     if (!(await isValidSignature(notification))) {
       return NextResponse.json({ message: "Invalid signature" }, { status: 403 });
     }
@@ -69,16 +70,13 @@ export async function POST(request: NextRequest) {
     const currentRank = rank[order.status] ?? 0;
     const incomingRank = rank[incomingStatus] ?? 0;
 
-    // Ignore stale notifications; never move a completed/paid order backward to pending.
-    if (order.status !== incomingStatus && incomingRank < currentRank && incomingStatus !== "CANCELLED") {
+    // Payment notifications may be retried or arrive out of order. Never regress a paid/fulfilled order.
+    if (order.status !== incomingStatus && incomingRank < currentRank) {
       return NextResponse.json({ message: "Stale notification ignored" });
     }
 
     await prisma.$transaction(async (tx) => {
-      await tx.order.update({
-        where: { id: order.id },
-        data: { status: incomingStatus },
-      });
+      await tx.order.update({ where: { id: order.id }, data: { status: incomingStatus } });
       await tx.payment.update({
         where: { orderId: order.id },
         data: {

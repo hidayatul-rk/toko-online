@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { auth } from "@/lib/auth";
-import type { OrderStatus, UserRole } from "@prisma/client";
+import type { OrderStatus, Role } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 
 async function requireAdmin() {
@@ -134,7 +134,7 @@ export async function updateUserRole(_prevState: { success: boolean; message: st
 
     const userId = String(formData.get("userId") ?? "");
     const roleValue = String(formData.get("role") ?? "");
-    const role: UserRole = roleValue === "ADMIN" ? "ADMIN" : roleValue === "CUSTOMER" ? "CUSTOMER" : (() => { throw new Error("Role tidak valid."); })();
+    const role: Role = roleValue === "ADMIN" ? "ADMIN" : roleValue === "CUSTOMER" ? "CUSTOMER" : (() => { throw new Error("Role tidak valid."); })();
 
     if (!userId) throw new Error("Pengguna tidak ditemukan.");
     if (userId === session.user.id && role !== "ADMIN") throw new Error("Anda tidak dapat menurunkan role akun admin yang sedang digunakan.");

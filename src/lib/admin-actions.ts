@@ -4,8 +4,8 @@ import { revalidatePath } from "next/cache";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { auth } from "@/lib/auth";
-import { prisma } from "@/lib/prisma";
 import type { OrderStatus } from "@prisma/client";
+import { prisma } from "@/lib/prisma";
 
 async function requireAdmin() {
   const session = await auth();
@@ -79,11 +79,8 @@ export async function createProduct(formData: FormData) {
   const stock = Number(formData.get("stock"));
   const weight = Number(formData.get("weight"));
   const categoryId = String(formData.get("categoryId") ?? "");
-  if (!name || name.length > 200 || !description || description.length > 10000 || !categoryId || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0 || !Number.isSafeInteger(weight) || weight <= 0) {
-    throw new Error("Data produk tidak valid.");
-  }
-  const category = await prisma.category.findUnique({ where: { id: categoryId }, select: { id: true } });
-  if (!category) throw new Error("Kategori tidak ditemukan.");
+  if (!name || name.length > 200 || !description || description.length > 10000 || !categoryId || !Number.isSafeInteger(price) || price < 0 || !Number.isSafeInteger(stock) || stock < 0 || !Number.isSafeInteger(weight) || weight <= 0) throw new Error("Data produk tidak valid.");
+  if (!(await prisma.category.findUnique({ where: { id: categoryId }, select: { id: true } }))) throw new Error("Kategori tidak ditemukan.");
   const slug = `${slugify(name)}-${Date.now()}`;
   const imagePaths = await saveProductImages((formData.getAll("newImages") as File[]).filter((f) => f.size > 0), slug);
   await prisma.product.create({ data: { name, slug, description, price, weight, stock, categoryId, images: imagePaths } });
@@ -131,7 +128,7 @@ export async function deleteProduct(_prevState: { success: boolean; message: str
 
 const allowedTransitions: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ["PAID", "CANCELLED"],
-  PAID: ["PROCESSING", "CANCELLED"],
+  PAID: ["PROCESSING"],
   PROCESSING: ["SHIPPED"],
   SHIPPED: ["COMPLETED"],
   COMPLETED: [],
@@ -147,15 +144,12 @@ export async function updateOrderStatus(_prevState: { success: boolean; message:
     const status = requested as OrderStatus;
 
     await prisma.$transaction(async (tx) => {
-      const order = await tx.order.findUnique({ where: { id }, include: { items: true, payment: true } });
+      const order = await tx.order.findUnique({ where: { id }, include: { items: true } });
       if (!order) throw new Error("Pesanan tidak ditemukan.");
       if (!allowedTransitions[order.status].includes(status)) throw new Error(`Transisi ${order.status} → ${status} tidak diizinkan.`);
-
+      await tx.order.update({ where: { id }, data: { status } });
       if (status === "CANCELLED") {
-        await tx.order.update({ where: { id }, data: { status } });
         for (const item of order.items) await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
-      } else {
-        await tx.order.update({ where: { id }, data: { status } });
       }
     });
 

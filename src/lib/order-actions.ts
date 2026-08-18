@@ -5,6 +5,8 @@ import { redirect } from "next/navigation";
 import { auth } from "@/lib/auth";
 import { prisma } from "@/lib/prisma";
 import { createSnap } from "@/lib/midtrans";
+import { getCityId, getShippingCost } from "@/lib/rajaongkir";
+import type { CourierCode } from "@/lib/rajaongkir";
 
 export async function checkout(formData: FormData) {
   const session = await auth();
@@ -13,7 +15,8 @@ export async function checkout(formData: FormData) {
   const shippingAddress = String(formData.get("shippingAddress") ?? "").trim();
   if (!shippingAddress) throw new Error("Alamat pengiriman wajib diisi.");
 
-  const shippingMethodIdRaw = String(formData.get("shippingMethodId") ?? "").trim();
+  const shippingOption = String(formData.get("shippingOption") ?? "").trim();
+  const [shippingMethodIdRaw, selectedService] = shippingOption.split(":");
   const shippingMethodId = shippingMethodIdRaw || null;
   const user = await prisma.user.findUnique({ where: { id: session.user.id } });
 
@@ -30,11 +33,25 @@ export async function checkout(formData: FormData) {
     throw new Error("Metode pengiriman tidak tersedia.");
   }
 
-  const shippingCost = shippingMethod?.price ?? 0;
-  const subtotal = cart.items.reduce(
-    (sum, item) => sum + item.product.price * item.quantity,
-    0,
-  );
+  const totalWeight = cart.items.reduce((sum, item) => sum + item.product.weight * item.quantity, 0);
+  let shippingCost = shippingMethod?.price ?? 0;
+
+  if (shippingMethod?.courier) {
+    if (!user?.kabupatenKota || !user.provinsi) throw new Error("Alamat pengiriman belum lengkap.");
+    const destinationCityId = await getCityId(user.kabupatenKota, user.provinsi);
+    if (!destinationCityId) throw new Error("Kota tujuan tidak ditemukan.");
+
+    const costs = await getShippingCost(
+      destinationCityId,
+      totalWeight,
+      shippingMethod.courier as CourierCode,
+    );
+    const selected = costs.find((cost) => cost.service === selectedService);
+    if (!selected) throw new Error("Layanan pengiriman tidak tersedia atau sudah berubah.");
+    shippingCost = selected.cost;
+  }
+
+  const subtotal = cart.items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
   const total = subtotal + shippingCost;
 
   const order = await prisma.$transaction(async (tx) => {
@@ -43,9 +60,7 @@ export async function checkout(formData: FormData) {
         where: { id: item.productId, isActive: true, stock: { gte: item.quantity } },
         data: { stock: { decrement: item.quantity } },
       });
-      if (result.count !== 1) {
-        throw new Error(`Stok "${item.product.name}" tidak mencukupi.`);
-      }
+      if (result.count !== 1) throw new Error(`Stok "${item.product.name}" tidak mencukupi.`);
     }
 
     return tx.order.create({
@@ -100,10 +115,7 @@ export async function checkout(formData: FormData) {
 
   await prisma.payment.update({
     where: { orderId: order.id },
-    data: {
-      transactionId: transaction.token ?? null,
-      rawResponse: transaction as unknown as object,
-    },
+    data: { transactionId: transaction.token ?? null, rawResponse: transaction as unknown as object },
   });
   await prisma.cartItem.deleteMany({ where: { cartId: cart.id } });
   redirect(transaction.redirect_url);
@@ -119,10 +131,7 @@ export async function cancelOrder(formData: FormData) {
     if (!order || order.userId !== session.user.id) throw new Error("Pesanan tidak ditemukan.");
     if (order.status !== "PENDING") throw new Error("Hanya pesanan dengan status Menunggu Pembayaran yang dapat dibatalkan.");
 
-    const changed = await tx.order.updateMany({
-      where: { id: orderId, status: "PENDING" },
-      data: { status: "CANCELLED" },
-    });
+    const changed = await tx.order.updateMany({ where: { id: orderId, status: "PENDING" }, data: { status: "CANCELLED" } });
     if (changed.count !== 1) throw new Error("Pesanan sudah diproses.");
 
     for (const item of order.items) {

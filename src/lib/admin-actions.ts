@@ -1,6 +1,7 @@
 "use server";
 
 import { revalidatePath } from "next/cache";
+import { redirect } from "next/navigation";
 import { writeFile, mkdir } from "fs/promises";
 import path from "path";
 import { auth } from "@/lib/auth";
@@ -128,7 +129,7 @@ export async function deleteProduct(_prevState: { success: boolean; message: str
 
 const allowedTransitions: Record<OrderStatus, OrderStatus[]> = {
   PENDING: ["PAID", "CANCELLED"],
-  PAID: ["PROCESSING"],
+  PAID: ["PROCESSING", "CANCELLED"],
   PROCESSING: ["SHIPPED"],
   SHIPPED: ["COMPLETED"],
   COMPLETED: [],
@@ -139,40 +140,36 @@ export async function updateOrderStatus(_prevState: { success: boolean; message:
   try {
     await requireAdmin();
     const id = String(formData.get("id") ?? "");
-    const requested = String(formData.get("status") ?? "");
-    if (!Object.prototype.hasOwnProperty.call(allowedTransitions, requested)) throw new Error("Status pesanan tidak valid.");
-    const status = requested as OrderStatus;
+    const nextStatus = String(formData.get("status") ?? "") as OrderStatus;
+    const validStatuses: OrderStatus[] = ["PENDING", "PAID", "PROCESSING", "SHIPPED", "COMPLETED", "CANCELLED"];
+    if (!validStatuses.includes(nextStatus)) return { success: false, message: "Status tidak valid." };
 
-    await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
       const order = await tx.order.findUnique({ where: { id }, include: { items: true } });
       if (!order) throw new Error("Pesanan tidak ditemukan.");
-      if (!allowedTransitions[order.status].includes(status)) throw new Error(`Transisi ${order.status} → ${status} tidak diizinkan.`);
-      await tx.order.update({ where: { id }, data: { status } });
-      if (status === "CANCELLED") {
-        for (const item of order.items) await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
+      if (order.status === nextStatus) return false;
+      if (!allowedTransitions[order.status].includes(nextStatus)) {
+        throw new Error(`Transisi ${order.status} → ${nextStatus} tidak diizinkan.`);
       }
+
+      if (nextStatus === "CANCELLED") {
+        for (const item of order.items) {
+          await tx.product.update({ where: { id: item.productId }, data: { stock: { increment: item.quantity } } });
+        }
+      }
+
+      const updated = await tx.order.updateMany({
+        where: { id, status: order.status },
+        data: { status: nextStatus },
+      });
+      if (updated.count !== 1) throw new Error("Status pesanan berubah. Silakan muat ulang halaman.");
+      return true;
     });
 
     revalidatePath("/admin/pesanan");
     revalidatePath(`/admin/pesanan/${id}`);
-    return { success: true, message: `Status pesanan diubah ke ${status}.` };
+    return { success: true, message: result ? "Status pesanan berhasil diupdate." : "Status pesanan sudah sesuai." };
   } catch (error) {
-    return { success: false, message: error instanceof Error ? error.message : "Gagal update status." };
-  }
-}
-
-export async function updateUserRole(_prevState: { success: boolean; message: string } | null, formData: FormData): Promise<{ success: boolean; message: string }> {
-  try {
-    const session = await auth();
-    if (!session?.user || session.user.role !== "ADMIN") return { success: false, message: "Akses ditolak." };
-    const userId = String(formData.get("userId") ?? "");
-    const role = String(formData.get("role") ?? "");
-    if (role !== "CUSTOMER" && role !== "ADMIN") return { success: false, message: "Role tidak valid." };
-    if (userId === session.user.id) return { success: false, message: "Tidak dapat mengubah role sendiri." };
-    await prisma.user.update({ where: { id: userId }, data: { role } });
-    revalidatePath("/admin/pengguna");
-    return { success: true, message: `Role diubah ke ${role === "ADMIN" ? "Admin" : "Pelanggan"}.` };
-  } catch (error) {
-    return { success: false, message: error instanceof Error ? error.message : "Gagal mengubah role." };
+    return { success: false, message: error instanceof Error ? error.message : "Gagal update status pesanan." };
   }
 }

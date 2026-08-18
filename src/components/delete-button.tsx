@@ -19,13 +19,14 @@ export function DeleteButton({ id, label = "Hapus", action }: Props) {
     useEffect(() => {
         if (state?.success) {
             toast.success(state.message);
-            setShowConfirm(false);
         } else if (state?.message) {
             toast.error(state.message);
         }
     }, [state]);
 
-    if (showConfirm) {
+    const shouldShowConfirm = showConfirm && !state?.success;
+
+    if (shouldShowConfirm) {
         return (
             <span className="inline-flex items-center gap-2">
                 <span className="text-xs text-black/60 dark:text-white/60">Yakin?</span>

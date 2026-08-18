@@ -36,14 +36,20 @@ function mapOrderStatus(transactionStatus: string, fraudStatus?: string) {
   return "PENDING";
 }
 
-const rank: Record<string, number> = {
-  CANCELLED: -1,
-  PENDING: 0,
-  PAID: 1,
-  PROCESSING: 2,
-  SHIPPED: 3,
-  COMPLETED: 4,
-};
+function shouldApplyNotification(current: string, incoming: string) {
+  if (current === incoming) return true;
+  if (current === "CANCELLED") return false;
+  if (incoming === "CANCELLED") return current === "PENDING";
+
+  const rank: Record<string, number> = {
+    PENDING: 0,
+    PAID: 1,
+    PROCESSING: 2,
+    SHIPPED: 3,
+    COMPLETED: 4,
+  };
+  return (rank[incoming] ?? 0) >= (rank[current] ?? 0);
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -55,28 +61,30 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ message: "Invalid signature" }, { status: 403 });
     }
 
+    const grossAmount = Number(notification.gross_amount);
+    if (!Number.isSafeInteger(grossAmount)) {
+      return NextResponse.json({ message: "Invalid amount" }, { status: 400 });
+    }
+
     const order = await prisma.order.findUnique({
       where: { id: notification.order_id },
       include: { payment: true },
     });
     if (!order) return NextResponse.json({ message: "Order not found" }, { status: 404 });
-
-    const grossAmount = Number(notification.gross_amount);
-    if (!Number.isSafeInteger(grossAmount) || grossAmount !== order.total) {
-      return NextResponse.json({ message: "Amount mismatch" }, { status: 400 });
-    }
+    if (grossAmount !== order.total) return NextResponse.json({ message: "Amount mismatch" }, { status: 400 });
 
     const incomingStatus = mapOrderStatus(notification.transaction_status, notification.fraud_status);
-    const currentRank = rank[order.status] ?? 0;
-    const incomingRank = rank[incomingStatus] ?? 0;
-
-    // Payment notifications may be retried or arrive out of order. Never regress a paid/fulfilled order.
-    if (order.status !== incomingStatus && incomingRank < currentRank) {
-      return NextResponse.json({ message: "Stale notification ignored" });
-    }
 
     await prisma.$transaction(async (tx) => {
-      await tx.order.update({ where: { id: order.id }, data: { status: incomingStatus } });
+      const current = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
+      if (!current || !shouldApplyNotification(current.status, incomingStatus)) return;
+
+      const updated = await tx.order.updateMany({
+        where: { id: order.id, status: current.status },
+        data: { status: incomingStatus },
+      });
+      if (updated.count !== 1) return;
+
       await tx.payment.update({
         where: { orderId: order.id },
         data: {

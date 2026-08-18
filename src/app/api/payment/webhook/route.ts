@@ -12,16 +12,21 @@ interface MidtransNotification {
   transaction_id?: string;
 }
 
+type MappedOrderStatus = "PENDING" | "PAID" | "CANCELLED";
+
 async function getServerKey(): Promise<string> {
   try {
     const setting = await prisma.setting.findUnique({ where: { key: "midtrans_server_key" } });
     if (setting?.value) return setting.value;
-  } catch { /* fallback */ }
+  } catch {
+    // Fall back to the environment variable when the database setting is unavailable.
+  }
   return process.env.MIDTRANS_SERVER_KEY ?? "";
 }
 
 async function isValidSignature(notification: MidtransNotification) {
   const serverKey = await getServerKey();
+  if (!serverKey) return false;
   const raw = notification.order_id + notification.status_code + notification.gross_amount + serverKey;
   const expected = crypto.createHash("sha512").update(raw).digest("hex");
   const provided = Buffer.from(notification.signature_key);
@@ -29,14 +34,14 @@ async function isValidSignature(notification: MidtransNotification) {
   return provided.length === expectedBuffer.length && crypto.timingSafeEqual(expectedBuffer, provided);
 }
 
-function mapOrderStatus(transactionStatus: string, fraudStatus?: string) {
+function mapOrderStatus(transactionStatus: string, fraudStatus?: string): MappedOrderStatus | null {
   if (transactionStatus === "capture") return fraudStatus === "accept" ? "PAID" : "PENDING";
   if (transactionStatus === "settlement") return "PAID";
   if (["cancel", "deny", "expire"].includes(transactionStatus)) return "CANCELLED";
-  return "PENDING";
+  return null;
 }
 
-function shouldApplyNotification(current: string, incoming: string) {
+function shouldApplyNotification(current: string, incoming: MappedOrderStatus) {
   if (current === incoming) return true;
   if (current === "CANCELLED") return false;
   if (incoming === "CANCELLED") return current === "PENDING";
@@ -48,21 +53,33 @@ function shouldApplyNotification(current: string, incoming: string) {
     SHIPPED: 3,
     COMPLETED: 4,
   };
-  return (rank[incoming] ?? 0) >= (rank[current] ?? 0);
+  return (rank[incoming] ?? -1) >= (rank[current] ?? -1);
 }
 
 export async function POST(request: NextRequest) {
   try {
     const notification = (await request.json()) as MidtransNotification;
-    if (!notification.order_id || !notification.signature_key || !notification.gross_amount) {
+    if (
+      !notification.order_id ||
+      !notification.status_code ||
+      !notification.signature_key ||
+      !notification.gross_amount ||
+      !notification.transaction_status
+    ) {
       return NextResponse.json({ message: "Invalid notification" }, { status: 400 });
     }
+
     if (!(await isValidSignature(notification))) {
       return NextResponse.json({ message: "Invalid signature" }, { status: 403 });
     }
 
+    const incomingStatus = mapOrderStatus(notification.transaction_status, notification.fraud_status);
+    if (!incomingStatus) {
+      return NextResponse.json({ message: "Unsupported transaction status" }, { status: 400 });
+    }
+
     const grossAmount = Number(notification.gross_amount);
-    if (!Number.isSafeInteger(grossAmount)) {
+    if (!Number.isSafeInteger(grossAmount) || grossAmount < 0) {
       return NextResponse.json({ message: "Invalid amount" }, { status: 400 });
     }
 
@@ -72,8 +89,6 @@ export async function POST(request: NextRequest) {
     });
     if (!order) return NextResponse.json({ message: "Order not found" }, { status: 404 });
     if (grossAmount !== order.total) return NextResponse.json({ message: "Amount mismatch" }, { status: 400 });
-
-    const incomingStatus = mapOrderStatus(notification.transaction_status, notification.fraud_status);
 
     await prisma.$transaction(async (tx) => {
       const current = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } });
